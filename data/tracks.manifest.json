@@ -1,0 +1,124 @@
+{
+  "schema": "bili-git-music-db.tracks-shards.v1",
+  "generated_at": "2026-05-22T00:00:00Z",
+  "total_tracks": 25965,
+  "shard_count": 19,
+  "encoding": "utf-8",
+  "format": "jsonl",
+  "shards": [
+    {
+      "path": "data/tracks/tracks_000.jsonl",
+      "bytes": 716452,
+      "sha256": "d5ca130a82cdc284212e4af524f4a1474be446e7f294494ed555581844292545",
+      "lines": 1323
+    },
+    {
+      "path": "data/tracks/tracks_001.jsonl",
+      "bytes": 716667,
+      "sha256": "d445edf2dc538766d65d43d3732f221f210019e0981548367b67b42418e58aa7",
+      "lines": 1355
+    },
+    {
+      "path": "data/tracks/tracks_002.jsonl",
+      "bytes": 716600,
+      "sha256": "6bdb68eb9708bcef2bd2d35a78acb6b4c56cb7f29d0399d7394f5e2cbaf09edc",
+      "lines": 1378
+    },
+    {
+      "path": "data/tracks/tracks_003.jsonl",
+      "bytes": 716392,
+      "sha256": "414050a9d39fc49e386cd2cbbc93f0a0ceccd399c3f9949547524495fb19dd7d",
+      "lines": 1341
+    },
+    {
+      "path": "data/tracks/tracks_004.jsonl",
+      "bytes": 716258,
+      "sha256": "653a99dd1284b8fd4d6f3e9a4746978962699a9bb3d7747e4360b459a49d4a98",
+      "lines": 1298
+    },
+    {
+      "path": "data/tracks/tracks_005.jsonl",
+      "bytes": 716546,
+      "sha256": "d1a34d22d3d77687937d882500672235444c797ce4ca2f67a9ca1b9aa584b698",
+      "lines": 1300
+    },
+    {
+      "path": "data/tracks/tracks_006.jsonl",
+      "bytes": 716468,
+      "sha256": "f49167cb9050a2a3548ba009cb26c917f34aa7177cf3552aae1bb802a0813461",
+      "lines": 1335
+    },
+    {
+      "path": "data/tracks/tracks_007.jsonl",
+      "bytes": 716607,
+      "sha256": "b332bc3f4bfec0c7e7b606406f2c22e618b3d53e58b36a0322debe40cfc5f64a",
+      "lines": 1424
+    },
+    {
+      "path": "data/tracks/tracks_008.jsonl",
+      "bytes": 716477,
+      "sha256": "48822ed566be4cbd0859e25ef0e9781c79578225b3d2bd92308ca009789e9bce",
+      "lines": 1417
+    },
+    {
+      "path": "data/tracks/tracks_009.jsonl",
+      "bytes": 716398,
+      "sha256": "8a7b65888a7c46732ee12028f7030b0590e49734b13a7bccddb3cf4ed2da0f17",
+      "lines": 1357
+    },
+    {
+      "path": "data/tracks/tracks_010.jsonl",
+      "bytes": 716484,
+      "sha256": "978bc462e5486393748dbbeb672e6aa637b53c66f88b2fc07dac9c61733a5aeb",
+      "lines": 1381
+    },
+    {
+      "path": "data/tracks/tracks_011.jsonl",
+      "bytes": 716203,
+      "sha256": "2144522a1297820f9d68847b62db9a63d1d886ff3658ef6785668e58c0bd76db",
+      "lines": 1420
+    },
+    {
+      "path": "data/tracks/tracks_012.jsonl",
+      "bytes": 716356,
+      "sha256": "e6b94c2744dbc3504935b8fe95ca3bb822b45a5789e72f4d75268f1245924516",
+      "lines": 1371
+    },
+    {
+      "path": "data/tracks/tracks_013.jsonl",
+      "bytes": 716691,
+      "sha256": "8abe0fe85da3346938b8f184314400902e2019da20c057d6b0caff589dd26576",
+      "lines": 1519
+    },
+    {
+      "path": "data/tracks/tracks_014.jsonl",
+      "bytes": 716311,
+      "sha256": "13ee7929a9517c2c017baf615e92d37c713d171e52584d09be173dfab8c94721",
+      "lines": 1601
+    },
+    {
+      "path": "data/tracks/tracks_015.jsonl",
+      "bytes": 716522,
+      "sha256": "03f3fd7ee3695b07c862d0ffa1e16a531015e5eb1aaf78ebf72578d7015211e5",
+      "lines": 1577
+    },
+    {
+      "path": "data/tracks/tracks_016.jsonl",
+      "bytes": 716392,
+      "sha256": "5053bd2320680fa3a3e7477a9d2c7ee566ee1d1c61a465e88e910a699ef76ef7",
+      "lines": 1623
+    },
+    {
+      "path": "data/tracks/tracks_017.jsonl",
+      "bytes": 716441,
+      "sha256": "3aeb9b92d735a6af4cdd59c63d4a73d8d0f10103f46201119f61c38d09b83084",
+      "lines": 1626
+    },
+    {
+      "path": "data/tracks/tracks_018.jsonl",
+      "bytes": 153073,
+      "sha256": "d57aace31d3e9cd410cd05058c8c071e1304c912f794f2c9ffeb60e341a80c9e",
+      "lines": 319
+    }
+  ]
+}
