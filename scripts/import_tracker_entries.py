@@ -11,7 +11,7 @@ Key rules:
   - Content ID field is "cd".
   - Long original video title is not stored in track rows.
   - No m3u is generated.
-  - Existing shards are rebuilt automatically.
+  - Default mode is append-only: old shards are not rewritten or resorted.
   - Timeline parsing accepts both:
       00:00 Song
       Song 00:00
@@ -1238,6 +1238,435 @@ def rebuild_albums_and_indexes(root: Path, tracks: List[Dict[str, Any]], issues:
 
 
 # ---------------------------------------------------------------------------
+# Incremental append writer
+# ---------------------------------------------------------------------------
+
+def load_json_file(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+
+    try:
+        return json.loads(read_text(path))
+    except Exception:
+        return default
+
+
+def count_jsonl_lines(path: Path) -> int:
+    if not path.exists():
+        return 0
+
+    count = 0
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.strip():
+                count += 1
+
+    return count
+
+
+def shard_entry_for_path(root: Path, rel_path: str) -> Dict[str, Any]:
+    path = root / rel_path
+    data = path.read_bytes() if path.exists() else b""
+
+    return {
+        "path": rel_path.replace("\\", "/"),
+        "tracks": count_jsonl_lines(path),
+        "bytes": len(data),
+        "sha256": sha256_bytes(data),
+    }
+
+
+def load_or_build_manifest(root: Path, shard_size: int) -> Dict[str, Any]:
+    manifest_path = root / "data" / "tracks.manifest.json"
+    manifest = load_json_file(manifest_path, None)
+
+    if isinstance(manifest, dict) and isinstance(manifest.get("shards"), list):
+        manifest.setdefault("schema", 2)
+        manifest.setdefault("kind", "tracker-songs-sharded-jsonl")
+        manifest.setdefault("shard_size_target", shard_size)
+
+        # Refresh existing shard stats once. Only the last shard usually changes,
+        # but this also repairs stale manifests without rewriting shard files.
+        refreshed = []
+        for item in manifest.get("shards", []):
+            rel = str(item.get("path") or "").replace("\\", "/")
+            if rel and (root / rel).exists():
+                refreshed.append(shard_entry_for_path(root, rel))
+
+        manifest["shards"] = refreshed
+        manifest["total_tracks"] = sum(int(s.get("tracks") or 0) for s in refreshed)
+        return manifest
+
+    tracks_dir = root / "data" / "tracks"
+    shards = []
+
+    if tracks_dir.exists():
+        for path in sorted(tracks_dir.glob("tracks_*.jsonl")):
+            rel = path.relative_to(root).as_posix()
+            shards.append(shard_entry_for_path(root, rel))
+
+    return {
+        "schema": 2,
+        "kind": "tracker-songs-sharded-jsonl",
+        "total_tracks": sum(int(s.get("tracks") or 0) for s in shards),
+        "shard_size_target": shard_size,
+        "shards": shards,
+    }
+
+
+def write_manifest(root: Path, manifest: Dict[str, Any]) -> None:
+    manifest["total_tracks"] = sum(int(s.get("tracks") or 0) for s in manifest.get("shards", []))
+    write_text(root / "data" / "tracks.manifest.json", stable_json(manifest, pretty=True))
+
+
+def next_shard_index(manifest: Dict[str, Any]) -> int:
+    max_idx = -1
+
+    for item in manifest.get("shards", []):
+        path = str(item.get("path") or "")
+        m = re.search(r"tracks_(\d+)\.jsonl$", path)
+        if m:
+            max_idx = max(max_idx, int(m.group(1)))
+
+    return max_idx + 1
+
+
+def append_lines_to_jsonl(path: Path, lines: List[str]) -> None:
+    if not lines:
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    need_leading_newline = False
+    if path.exists() and path.stat().st_size > 0:
+        with path.open("rb") as f:
+            f.seek(-1, os.SEEK_END)
+            need_leading_newline = f.read(1) != b"\n"
+
+    with path.open("ab") as f:
+        if need_leading_newline:
+            f.write(b"\n")
+
+        for line in lines:
+            f.write(line.encode("utf-8"))
+            f.write(b"\n")
+
+
+def append_tracks_to_shards_incremental(root: Path, tracks: List[Dict[str, Any]], shard_size: int) -> Dict[str, Any]:
+    """
+    Append new tracks only.
+
+    This does not sort old data, does not rewrite old shards, and does not move
+    previous records. It updates only:
+      - the last shard if it has enough room,
+      - newly created shard files,
+      - data/tracks.manifest.json.
+    """
+    manifest = load_or_build_manifest(root, shard_size)
+    tracks_dir = root / "data" / "tracks"
+    tracks_dir.mkdir(parents=True, exist_ok=True)
+
+    remaining_lines = [stable_json(t) for t in tracks]
+    line_sizes = [len((line + "\n").encode("utf-8")) for line in remaining_lines]
+
+    cursor = 0
+
+    # 1. Fill existing last shard if possible.
+    shards = manifest.get("shards", [])
+    if shards and cursor < len(remaining_lines):
+        last = shards[-1]
+        rel = str(last.get("path") or "")
+        last_path = root / rel
+
+        if last_path.exists():
+            current_size = last_path.stat().st_size
+            batch: List[str] = []
+            batch_size = 0
+
+            while cursor < len(remaining_lines):
+                sz = line_sizes[cursor]
+
+                if batch and current_size + batch_size + sz > shard_size:
+                    break
+
+                if not batch and current_size + sz > shard_size:
+                    break
+
+                batch.append(remaining_lines[cursor])
+                batch_size += sz
+                cursor += 1
+
+            if batch:
+                append_lines_to_jsonl(last_path, batch)
+                shards[-1] = shard_entry_for_path(root, rel)
+
+    # 2. Create new shards for the remaining records.
+    shard_index = next_shard_index(manifest)
+
+    while cursor < len(remaining_lines):
+        batch: List[str] = []
+        batch_size = 0
+
+        while cursor < len(remaining_lines):
+            sz = line_sizes[cursor]
+
+            if batch and batch_size + sz > shard_size:
+                break
+
+            batch.append(remaining_lines[cursor])
+            batch_size += sz
+            cursor += 1
+
+        name = f"tracks_{shard_index:03d}.jsonl"
+        rel = f"data/tracks/{name}"
+        path = root / rel
+        append_lines_to_jsonl(path, batch)
+        manifest.setdefault("shards", []).append(shard_entry_for_path(root, rel))
+        shard_index += 1
+
+    write_manifest(root, manifest)
+    return manifest
+
+
+def existing_track_keys(tracks: Iterable[Dict[str, Any]]) -> set:
+    keys = set()
+
+    for t in tracks:
+        vid = str(t.get("id") or "")
+        if not vid:
+            continue
+
+        try:
+            start = int(t.get("start") or 0)
+        except Exception:
+            start = 0
+
+        keys.add((vid, start))
+
+    return keys
+
+
+def filter_new_tracks_incremental(
+    existing: List[Dict[str, Any]],
+    incoming: List[Dict[str, Any]],
+    issues: List[ImportIssue],
+) -> List[Dict[str, Any]]:
+    seen = existing_track_keys(existing)
+    result: List[Dict[str, Any]] = []
+
+    for t in incoming:
+        vid = str(t.get("id") or "")
+        if not vid:
+            continue
+
+        try:
+            start = int(t.get("start") or 0)
+        except Exception:
+            start = 0
+
+        key = (vid, start)
+
+        if key in seen:
+            issues.append(
+                ImportIssue(
+                    id=vid,
+                    type="duplicate_skipped",
+                    message=f"track with same id/start already exists, skipped: start={start}",
+                    line=str(t.get("title") or ""),
+                )
+            )
+            continue
+
+        seen.add(key)
+        result.append(t)
+
+    return result
+
+
+def album_group_key(track: Dict[str, Any]) -> Tuple[str, str, str]:
+    return (
+        str(track.get("artist") or "Unknown Artist"),
+        str(track.get("album") or "Unknown Album"),
+        str(track.get("id") or ""),
+    )
+
+
+def write_album_file(root: Path, key: Tuple[str, str, str], group: List[Dict[str, Any]]) -> None:
+    artist, album, vid = key
+    albums_dir = root / "data" / "albums"
+    albums_dir.mkdir(parents=True, exist_ok=True)
+
+    group = sorted(group, key=lambda x: int(x.get("start") or 0))
+
+    album_obj = {
+        "id": vid,
+        "artist": artist,
+        "album": album,
+        "album_artist": group[0].get("album_artist") or artist if group else artist,
+        "tracks": [
+            {
+                "start": t.get("start"),
+                "end": t.get("end"),
+                "title": t.get("title"),
+                "url": t.get("url"),
+            }
+            for t in group
+        ],
+    }
+
+    file_name = f"{safe_filename(artist)} - {safe_filename(album)} [{safe_filename(vid)}].json"
+    write_text(albums_dir / file_name, stable_json(album_obj, pretty=True))
+
+
+def update_albums_incremental(root: Path, all_tracks: List[Dict[str, Any]], incoming: List[Dict[str, Any]]) -> None:
+    affected = {album_group_key(t) for t in incoming}
+    if not affected:
+        return
+
+    groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = collections.defaultdict(list)
+
+    for t in all_tracks:
+        key = album_group_key(t)
+        if key in affected:
+            groups[key].append(t)
+
+    for key, group in groups.items():
+        write_album_file(root, key, group)
+
+
+def append_unique_json_item(items: List[Any], item: Any) -> None:
+    marker = stable_json(item)
+    existing = {stable_json(x) for x in items}
+    if marker not in existing:
+        items.append(item)
+
+
+def sorted_unique_strings(values: Iterable[str]) -> List[str]:
+    return sorted({str(v) for v in values if str(v)})
+
+
+def update_indexes_incremental(
+    root: Path,
+    incoming: List[Dict[str, Any]],
+    issues: List[ImportIssue],
+    manifest: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Update only index files, not track shards.
+
+    These index JSON files are still rewritten as whole files because they are
+    monolithic indexes. The important part is that previous shard records are
+    not reordered or rewritten.
+    """
+    indexes_dir = root / "indexes"
+    indexes_dir.mkdir(parents=True, exist_ok=True)
+
+    by_id_path = indexes_dir / "by_id.json"
+    by_artist_path = indexes_dir / "by_artist.json"
+    by_album_path = indexes_dir / "by_album.json"
+    by_track_title_path = indexes_dir / "by_track_title.json"
+    catalog_path = indexes_dir / "catalog.json"
+    issues_path = indexes_dir / "issues.json"
+
+    by_id = load_json_file(by_id_path, {})
+    by_artist = load_json_file(by_artist_path, {})
+    by_album = load_json_file(by_album_path, {})
+    by_track_title = load_json_file(by_track_title_path, {})
+
+    if not isinstance(by_id, dict):
+        by_id = {}
+    if not isinstance(by_artist, dict):
+        by_artist = {}
+    if not isinstance(by_album, dict):
+        by_album = {}
+    if not isinstance(by_track_title, dict):
+        by_track_title = {}
+
+    for t in incoming:
+        vid = str(t.get("id") or "")
+        artist = str(t.get("artist") or "Unknown Artist")
+        album = str(t.get("album") or "Unknown Album")
+        title = str(t.get("title") or "")
+
+        by_id.setdefault(vid, [])
+        append_unique_json_item(
+            by_id[vid],
+            {
+                "start": t.get("start"),
+                "title": title,
+                "artist": artist,
+                "album": album,
+            }
+        )
+
+        by_artist[artist] = sorted_unique_strings(list(by_artist.get(artist, [])) + [album])
+        by_album[album] = sorted_unique_strings(list(by_album.get(album, [])) + [artist])
+
+        by_track_title.setdefault(title, [])
+        append_unique_json_item(
+            by_track_title[title],
+            {
+                "id": vid,
+                "start": t.get("start"),
+                "artist": artist,
+                "album": album,
+            }
+        )
+
+    write_text(by_id_path, stable_json(by_id, pretty=True))
+    write_text(by_artist_path, stable_json(dict(sorted(by_artist.items())), pretty=True))
+    write_text(by_album_path, stable_json(dict(sorted(by_album.items())), pretty=True))
+    write_text(by_track_title_path, stable_json(by_track_title, pretty=True))
+
+    total_tracks = 0
+    if manifest:
+        total_tracks = int(manifest.get("total_tracks") or 0)
+    else:
+        manifest = load_or_build_manifest(root, DEFAULT_SHARD_SIZE)
+        total_tracks = int(manifest.get("total_tracks") or 0)
+
+    catalog = {
+        "total_tracks": total_tracks,
+        "total_videos": len(by_id),
+        "total_artists": len(by_artist),
+        "total_albums": len(by_album),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    write_text(catalog_path, stable_json(catalog, pretty=True))
+
+    if issues:
+        old_issues = load_json_file(issues_path, [])
+        if not isinstance(old_issues, list):
+            old_issues = []
+
+        for issue in issues:
+            item = dataclasses.asdict(issue)
+            item["imported_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            old_issues.append(item)
+
+        write_text(issues_path, stable_json(old_issues, pretty=True))
+
+
+def update_issues_only_incremental(root: Path, issues: List[ImportIssue]) -> None:
+    if not issues:
+        return
+
+    issues_path = root / "indexes" / "issues.json"
+    issues_path.parent.mkdir(parents=True, exist_ok=True)
+
+    old_issues = load_json_file(issues_path, [])
+    if not isinstance(old_issues, list):
+        old_issues = []
+
+    for issue in issues:
+        item = dataclasses.asdict(issue)
+        item["imported_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        old_issues.append(item)
+
+    write_text(issues_path, stable_json(old_issues, pretty=True))
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1263,6 +1692,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="HTTP timeout seconds")
     parser.add_argument("--shard-size", type=int, default=DEFAULT_SHARD_SIZE, help="target max shard size in bytes")
     parser.add_argument("--dry-run", action="store_true", help="parse and enrich, but do not write database")
+    parser.add_argument("--full-rebuild", action="store_true", help="rewrite all shards/albums/indexes; default is append-only incremental import")
     args = parser.parse_args(argv)
 
     root = Path(args.root).resolve()
@@ -1296,30 +1726,53 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 3
 
     existing = load_existing_tracks(root)
-    merged = merge_tracks(existing, incoming)
+    new_tracks = filter_new_tracks_incremental(existing, incoming, issues)
+
+    if args.full_rebuild:
+        merged = merge_tracks(existing, incoming)
+    else:
+        merged = existing + new_tracks
 
     print(f"Existing tracks: {len(existing)}")
     print(f"Incoming tracks: {len(incoming)}")
+    print(f"New tracks:      {len(new_tracks)}")
     print(f"Merged tracks:   {len(merged)}")
     print(f"Issues:          {len(issues)}")
+    print(f"Mode:            {'full rebuild' if args.full_rebuild else 'append-only incremental'}")
 
     if args.dry_run:
         for issue in issues[:20]:
             print(f"[{issue.type}] {issue.id}: {issue.message} :: {issue.line}", file=sys.stderr)
         return 0
 
-    rebuild_shards(root, merged, args.shard_size)
-    rebuild_albums_and_indexes(root, merged, issues)
+    if args.full_rebuild:
+        rebuild_shards(root, merged, args.shard_size)
+        rebuild_albums_and_indexes(root, merged, issues)
 
-    print("Done.")
-    print("Updated:")
-    print("  data/tracks.manifest.json")
-    print("  data/tracks/*.jsonl")
-    print("  data/albums/*.json")
-    print("  indexes/*.json")
+        print("Done.")
+        print("Updated by full rebuild:")
+        print("  data/tracks.manifest.json")
+        print("  data/tracks/*.jsonl")
+        print("  data/albums/*.json")
+        print("  indexes/*.json")
+    else:
+        if new_tracks:
+            manifest = append_tracks_to_shards_incremental(root, new_tracks, args.shard_size)
+            update_albums_incremental(root, merged, new_tracks)
+            update_indexes_incremental(root, new_tracks, issues, manifest=manifest)
+
+            print("Done.")
+            print("Updated incrementally:")
+            print("  data/tracks.manifest.json")
+            print("  data/tracks/last-or-new-shard.jsonl")
+            print("  data/albums/<affected albums>.json")
+            print("  indexes/*.json")
+        else:
+            update_issues_only_incremental(root, issues)
+            print("No new tracks to append.")
 
     if issues:
-        print("Some lines were skipped. See indexes/issues.json")
+        print("Some lines were skipped or duplicated. See indexes/issues.json")
 
     return 0
 
